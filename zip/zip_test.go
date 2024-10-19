@@ -1,4 +1,4 @@
-package memoryZip
+package zip
 
 import (
 	"os"
@@ -48,7 +48,7 @@ func ZipTest(t *testing.T, url string) {
 	}
 	defer os.RemoveAll(dir)
 
-	err = ExtractGet(url, dir)
+	err = ExtractFromUrl(url, dir)
 	if err != nil {
 		t.Fatal(err)
 	}

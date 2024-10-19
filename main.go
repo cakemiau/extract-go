@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cakemiau/zip-go/memoryZip"
+	"github.com/cakemiau/zip-go/zip"
 )
 
 func main() {
@@ -14,7 +14,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err := memoryZip.ExtractGet(os.Args[1], os.Args[2])
+	err := zip.ExtractFromUrl(os.Args[1], os.Args[2])
 	if err != nil {
 		fmt.Println(err)
 	}

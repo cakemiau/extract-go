@@ -1,4 +1,4 @@
-package memoryZip
+package zip
 
 import (
 	"archive/zip"
@@ -64,8 +64,8 @@ func CommonPathZipFile(zipFiles []*zip.File) string {
 	return CommonPath(first, last)
 }
 
-// Extracts all the contents of the Zip file, skipping the shared root folder if possible.
-func Extract(zipReader *zip.Reader, outputPath string) error {
+// Extracts all the contents of the Zip file, omitting the shared root folder if possible.
+func ExtractAll(zipReader *zip.Reader, outputPath string) error {
 
 	shared_path_len := len(CommonPathZipFile(zipReader.File))
 
@@ -105,8 +105,9 @@ func Extract(zipReader *zip.Reader, outputPath string) error {
 	return nil
 }
 
-// Makes a GET request for a Zip file and extracts it, skipping the shared root folder if possible.
-func ExtractGet(sourceUrl string, outputPath string) error {
+// Makes a GET request for a Zip file, loads it into memory and
+// extracts it, omitting the shared root folder if possible.
+func ExtractFromUrl(sourceUrl string, outputPath string) error {
 
 	res, err := http.Get(sourceUrl)
 	if err != nil {
@@ -135,5 +136,5 @@ func ExtractGet(sourceUrl string, outputPath string) error {
 		return err
 	}
 
-	return Extract(zipReader, outputPath)
+	return ExtractAll(zipReader, outputPath)
 }
