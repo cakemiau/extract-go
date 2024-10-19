@@ -86,43 +86,51 @@ func Extract(zipReader *zip.Reader, outputPath string) error {
 		if err != nil {
 			return err
 		}
+		defer z.Close()
 
 		f, err := os.Create(fileName)
 		if err != nil {
 			return err
 		}
+		defer f.Close()
 
 		_, err = io.Copy(f, z)
+		z.Close()
+		f.Close()
 		if err != nil {
 			return err
 		}
-
-		z.Close()
-		f.Close()
 	}
 
 	return nil
 }
 
-// Creates a zip.Reader from an HTTP response body stored in memory.
-func MemoryZipReader(res *http.Response) (*zip.Reader, error) {
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return zip.NewReader(bytes.NewReader(body), int64(len(body)))
-}
-
 // Makes a GET request for a Zip file and extracts it, skipping the shared root folder if possible.
 func ExtractGet(sourceUrl string, outputPath string) error {
+
 	res, err := http.Get(sourceUrl)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
 
-	zipReader, err := MemoryZipReader(res)
+	var zipReader *zip.Reader
+	var byteReader *bytes.Reader
+	var zipBytes []byte
+
+	defer func() {
+		zipReader = nil
+		byteReader = nil
+		zipBytes = nil
+	}()
+
+	zipBytes, err = io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	byteReader = bytes.NewReader(zipBytes)
+	zipReader, err = zip.NewReader(byteReader, int64(len(zipBytes)))
 	if err != nil {
 		return err
 	}
