@@ -1,86 +1,39 @@
 package extract
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
+	"strings"
 )
 
-// Finds the shared directory of two paths, assuming all directories have a trailing forward slash (/)
-func CommonPath(s1 string, s2 string) string {
-	max_len := min(len(s1), len(s2))
+func Zip(zipReader *zip.Reader, outputPath string) error {
 
-	i := 0
-	end := 0
-	for i < max_len && s1[i] == s2[i] {
-		if s1[i] == '/' {
-			end = i
-		}
-		i++
-	}
-
-	if end == 0 {
-		return ""
-	}
-
-	return s1[:end+1]
-}
-
-// Finds the shared directory of a list of paths, assuming all directories have a trailing forward slash (/)
-func CommonPathStrList(strList []string) string {
-	n := len(strList)
-	if n <= 0 {
-		return ""
-	}
-
-	slices.Sort(strList)
-
-	first := strList[0]
-	last := strList[n-1]
-
-	return CommonPath(first, last)
-}
-
-// Finds the shared directory of a list of zipFiles, assuming all directories have a trailing forward slash (/)
-func CommonPathZipFile(zipFiles []*zip.File) string {
-	n := len(zipFiles)
-	if n <= 0 {
-		return ""
-	}
-
-	sort.Slice(zipFiles, func(i, j int) bool {
-		return zipFiles[i].Name < zipFiles[j].Name
-	})
-
-	first := zipFiles[0].Name
-	last := zipFiles[n-1].Name
-
-	return CommonPath(first, last)
-}
-
-// Extracts all the contents of the Zip file, omitting the shared root folder if possible.
-func ExtractAll(zipReader *zip.Reader, outputPath string) error {
-
-	shared_path_len := len(CommonPathZipFile(zipReader.File))
+	prefixPathLen := len(pathPrefixZipList(zipReader.File))
 
 	for _, zipFile := range zipReader.File {
 
-		fmt.Println(zipFile.Name)
+		verbose(zipFile.Name)
 
-		fileName := filepath.Join(outputPath, zipFile.Name[shared_path_len:])
+		fileName := filepath.Join(outputPath, zipFile.Name[prefixPathLen:])
 
 		if zipFile.FileInfo().IsDir() {
-			os.MkdirAll(fileName, 0777)
+			if err := os.MkdirAll(fileName, 0755); err != nil {
+				return err
+			}
 			continue
 		}
 
-		os.MkdirAll(filepath.Dir(fileName), 0777)
+		if err := os.MkdirAll(filepath.Dir(fileName), 0755); err != nil {
+			return err
+		}
 
 		z, err := zipFile.Open()
 		if err != nil {
@@ -105,36 +58,153 @@ func ExtractAll(zipReader *zip.Reader, outputPath string) error {
 	return nil
 }
 
-// Makes a GET request for a Zip file, loads it into memory and
-// extracts it, omitting the shared root folder if possible.
-func ExtractFromUrl(sourceUrl string, outputPath string) error {
+func Tar(tarReader *tar.Reader, outputPath string) error {
+
+	// Tar files are read sequentally, so we have to extract all files to
+	// a temporary directory and then move them to remove the path prefix.
+
+	tempDir, err := os.MkdirTemp("", "extract-go-output-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+
+	fileNames := []string{}
+
+	for {
+		header, err := tarReader.Next()
+
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+
+		verbose(header.Name)
+
+		fileName := filepath.Join(tempDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.Mkdir(fileName, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			f, err := os.Create(fileName)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			if _, err := io.Copy(f, tarReader); err != nil {
+				return err
+			}
+			f.Close()
+			fileNames = append(fileNames, header.Name)
+		default:
+			return fmt.Errorf("unsupported type %c for %s", header.Typeflag, header.Name)
+		}
+	}
+
+	prefixPathLen := len(pathPrefixStrList(fileNames))
+
+	for _, fileName := range fileNames {
+		err := os.Rename(
+			filepath.Join(tempDir, fileName),
+			filepath.Join(outputPath, fileName[prefixPathLen:]),
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func Url(sourceUrl string, outputPath string, maxMemorySize int) error {
 
 	res, err := http.Get(sourceUrl)
 	if err != nil {
 		return err
 	}
+	defer res.Body.Close()
 
-	var zipReader *zip.Reader
-	var byteReader *bytes.Reader
-	var zipBytes []byte
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("http response code %d", res.StatusCode)
+	}
 
-	defer func() {
-		zipReader = nil
-		byteReader = nil
-		zipBytes = nil
-	}()
+	mimeType := res.Header.Get("content-type")
+	fileName := filepath.Base(res.Request.URL.Path)
+	if _, params, err := mime.ParseMediaType(res.Header.Get("content-disposition")); err == nil {
+		value, exists := params["filename"]
+		if exists {
+			fileName = value
+		}
+	}
 
-	zipBytes, err = io.ReadAll(res.Body)
-	res.Body.Close()
-	if err != nil {
+	// Create a buffer to hold the initial part of the response
+	buff := make([]byte, maxMemorySize)
+	bytesRead, err := io.ReadFull(res.Body, buff)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return err
 	}
 
-	byteReader = bytes.NewReader(zipBytes)
-	zipReader, err = zip.NewReader(byteReader, int64(len(zipBytes)))
-	if err != nil {
-		return err
+	var rawStream io.ReaderAt
+	var rawSize int64
+
+	if bytesRead < maxMemorySize {
+		// file fits in the defined max memory size
+		rawStream = bytes.NewReader(buff)
+		rawSize = int64(bytesRead)
+
+	} else {
+		// file does not fit in the defined max memory size
+
+		file, err := os.CreateTemp("", "extract-go-input-")
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		// write the data in the buffer to the file
+		bytesReadBuffer, err := file.Write(buff)
+		if err != nil {
+			return err
+		}
+
+		// copy the remaining data from the response body to the file
+		bytesReadRemaining, err := io.Copy(file, res.Body)
+		if err != nil {
+			return err
+		}
+		res.Body.Close()
+
+		rawStream = file
+		rawSize = int64(bytesReadBuffer) + bytesReadRemaining
 	}
 
-	return ExtractAll(zipReader, outputPath)
+	if mimeType == "application/zip" || mimeType == "application/x-zip-compressed" || strings.HasSuffix(fileName, ".zip") {
+
+		zipReader, err := zip.NewReader(rawStream, rawSize)
+		if err != nil {
+			return err
+		}
+		return Zip(zipReader, outputPath)
+
+	} else if mimeType == "application/gzip" || mimeType == "application/x-gzip" || strings.HasSuffix(fileName, ".tar.gz") {
+
+		ungzippedStream, err := gzip.NewReader(io.NewSectionReader(rawStream, 0, rawSize))
+		if err != nil {
+			return err
+		}
+		tarReader := tar.NewReader(ungzippedStream)
+		return Tar(tarReader, outputPath)
+
+	} else if mimeType == "application/x-tar" || strings.HasSuffix(fileName, ".tar") {
+
+		tarReader := tar.NewReader(io.NewSectionReader(rawStream, 0, rawSize))
+		return Tar(tarReader, outputPath)
+
+	}
+
+	return fmt.Errorf("unsupported or undefined file format (Type: %s | Name: %s)", mimeType, fileName)
 }
