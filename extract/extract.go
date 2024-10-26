@@ -100,6 +100,11 @@ func Tar(tarReader *tar.Reader, outputPath string) error {
 			}
 			f.Close()
 			fileNames = append(fileNames, header.Name)
+		case tar.TypeSymlink:
+			if err := os.Symlink(header.Linkname, fileName); err != nil {
+				return err
+			}
+			fileNames = append(fileNames, header.Name)
 		default:
 			return fmt.Errorf("unsupported type %c for %s", header.Typeflag, header.Name)
 		}
@@ -108,11 +113,11 @@ func Tar(tarReader *tar.Reader, outputPath string) error {
 	prefixPathLen := len(pathPrefixStrList(fileNames))
 
 	for _, fileName := range fileNames {
-		err := os.Rename(
-			filepath.Join(tempDir, fileName),
-			filepath.Join(outputPath, fileName[prefixPathLen:]),
-		)
-		if err != nil {
+		outputFilePath := filepath.Join(outputPath, fileName[prefixPathLen:])
+		if err := os.MkdirAll(filepath.Dir(outputFilePath), 0755); err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(tempDir, fileName), outputFilePath); err != nil {
 			return err
 		}
 	}
