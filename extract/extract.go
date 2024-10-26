@@ -1,4 +1,4 @@
-package zip
+package extract
 
 import (
 	"archive/zip"
